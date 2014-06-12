@@ -118,7 +118,9 @@ runMsg to s = do
   prefix <- botPrefix `fmap` ask
   let action =
         let s' = B.drop (B.length prefix) s
-            (cmd, arg) = second B.tail (B.break (== ' ') s')
+            (cmd, arg) = second
+                         (\x ->if B.null x then x else B.tail x)
+                         (B.break (== ' ') s')
         in runCmd cmd arg >>= privmsg to
   if prefix `B.isPrefixOf` s then action else return ()
 
