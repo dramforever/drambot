@@ -9,9 +9,7 @@ import Control.Monad.Reader
 import Control.Exception
 import Data.IORef
 
-data Bot = Bot { botServer :: HostName
-               , botPort :: PortNumber
-               , botChan :: B.ByteString
+data Bot = Bot { botChan :: B.ByteString
                , botNick :: B.ByteString
                , botPrefix :: B.ByteString
                , botSock  :: Handle
@@ -43,23 +41,20 @@ initialBotState = BotState {
   bsCounter = 0
 }
 
-connect :: IO Bot
-connect = do
-  let server = "irc.freenode.org"
-      port   = 6666
-      chan   = "#illumer"
-      nick   = "drambot"
-      prefix = "!"
-  h <- connectTo server (PortNumber port)
-  r <- newIORef initialBotState
-  hSetBuffering h NoBuffering
-  return Bot { botServer = server
-             , botPort = port
-             , botChan = chan
+connect :: Handle
+        -> B.ByteString
+        -> B.ByteString
+        -> B.ByteString
+        -> IO Bot
+
+connect han chan nick pre = do
+  ref <- newIORef initialBotState
+  hSetBuffering han NoBuffering
+  return Bot { botChan = chan
              , botNick = nick
-             , botPrefix = prefix
-             , botSock  = h
-             , botState = r
+             , botPrefix = pre
+             , botSock  = han
+             , botState = ref
              }
 
 auth :: Net ()
@@ -115,14 +110,18 @@ logAndRunLine str = do
 
 runMsg :: B.ByteString -> B.ByteString -> Net ()
 runMsg to s = do
-  prefix <- botPrefix `fmap` ask
-  let action =
-        let s' = B.drop (B.length prefix) s
-            (cmd, arg) = second
-                         (\x ->if B.null x then x else B.tail x)
-                         (B.break (== ' ') s')
-        in runCmd cmd arg >>= privmsg to
-  if prefix `B.isPrefixOf` s then action else return ()
+  bot <- ask
+  let prefix = botPrefix bot
+      nick = botNick bot
+      s' = B.drop (B.length prefix) s
+      (cmd, arg) = second
+                   (\x -> if B.null x then x else B.tail x)
+                   (B.break (== ' ') s')
+      action
+        | nick `B.isPrefixOf` s = runCmd "%mention" "" >>= privmsg to
+        | prefix `B.isPrefixOf` s = runCmd cmd arg >>= privmsg to
+        | otherwise = return ()
+  action
 
 runCmd :: B.ByteString -> B.ByteString -> Net B.ByteString
 runCmd "hi" _ = return "Hello"
@@ -138,18 +137,24 @@ runCmd "help" "echo" = return "Just echo"
 runCmd "help" "+1" = return "A basic counter"
 runCmd "help" _ = return "Commands: help hi echo +1"
 
+runCmd "%mention" _ = return "Hi, I'm drambot. Try !help"
+
 runCmd s _= return $ "Unknown command " <> s <> ", try !help"
 
-getMsgs :: Bot -> IO [B.ByteString]
-getMsgs bot = (map B.init . filter (not . B.null))
-              `fmap` B.split '\n'
-              `fmap` (B.hGetContents $ botSock bot)
+getMsgs :: Net [B.ByteString]
+getMsgs = (map B.init . filter (not . B.null))
+          `fmap` B.split '\n'
+          `fmap` (askSock >>= liftIO . B.hGetContents)
 
-main' :: Bot -> IO ()
-main' bot = do
-  runReaderT auth bot
-  msgs <- getMsgs bot
-  runReaderT (mapM_ logAndRunLine msgs) bot
+main' :: Net ()
+main' = do
+  auth
+  getMsgs >>= mapM_ logAndRunLine
 
 main :: IO ()
-main = bracket connect (\_ -> putStrLn "* Stopped!") main'
+main = do
+  han <- connectTo "irc.freenode.org" (PortNumber 6666)
+  bracket (connect han "#illumer" "drambot" "!")
+    (\_ -> putStrLn "* Stopped!")
+    (runReaderT main')
+
